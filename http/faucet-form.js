@@ -2,6 +2,8 @@ import { dpc, html, css, BaseElement, FlowFormat } from "/flow/flow-ux/flow-ux.j
 import { Decimal } from "/flow/flow-ux/extern/decimal.js";
 import { HTN } from "./htn.js";
 
+const getAddressPrefix = (network) => (network === "hoosat-mainnet" ? "hoosat" : "hoosattest");
+
 export class FaucetForm extends BaseElement {
   static get properties() {
     return {
@@ -47,14 +49,15 @@ export class FaucetForm extends BaseElement {
     const { rpc } = flow.app;
   }
 
-  offlineCallback() {}
+  offlineCallback() { }
 
   render() {
     const { aliases } = flow.app;
+    const addressPrefix = getAddressPrefix(this.network);
     return html`
       <div class="message">Enter your address and the amount of Hoosat you want to receive:</div>
       <flow-input
-        label="Address (Must start with '${this.network.replace("-mainnet", "").replace("-testnet", "")}' prefix)"
+        label="Address (Must start with '${addressPrefix}:' prefix)"
         class="address"
         x-value="${this.address}"
       ></flow-input>
@@ -72,14 +75,15 @@ export class FaucetForm extends BaseElement {
     let address = qS(".address").value;
     let network = qS(".network").value;
     let amount = qS(".amount").value;
+    const addressPrefix = getAddressPrefix(network);
 
     console.log({ address, network, amount });
 
-    if (!/^hoosat:[1-9A-HJ-NP-Za-km-z]/.test(address)) {
-      return this.setError("Invalid Address");
-    }
-
     if (!address) return this.setError("Please enter address");
+
+    if (!address.startsWith(`${addressPrefix}:`)) {
+      return this.setError(`Invalid address for ${flow.app.aliases?.[network] || network}. Use ${addressPrefix}:`);
+    }
 
     amount = parseFloat(amount.replace(",", ".")) || 0;
     if (!amount || amount < 1e-8 || amount > 100000) return this.setError("Please enter amount between 0.0000001-0.35");

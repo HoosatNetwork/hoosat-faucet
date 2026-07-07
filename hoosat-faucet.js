@@ -14,17 +14,65 @@ const Cookie = require("cookie");
 const CookieSignature = require("cookie-signature");
 const { Command, CommanderError } = require("commander");
 const ws = require("ws");
+
+if (typeof globalThis.fetch !== "function") {
+  const fetch = require("node-fetch");
+  globalThis.fetch = fetch;
+  globalThis.Headers = fetch.Headers;
+  globalThis.Request = fetch.Request;
+  globalThis.Response = fetch.Response;
+}
+
+function createSessionCompat(sessionFactory) {
+  const compatSession = (options) => {
+    const middleware = sessionFactory(options);
+
+    return (req, res, next) => {
+      if (typeof res.writeHead !== "function") {
+        res.writeHead = () => res;
+      }
+
+      if (typeof res.write !== "function") {
+        res.write = () => true;
+      }
+
+      if (typeof res.end !== "function") {
+        res.end = () => res;
+      }
+
+      if (typeof res.getHeader !== "function") {
+        res.getHeader = () => undefined;
+      }
+
+      if (typeof res.setHeader !== "function") {
+        res.setHeader = () => undefined;
+      }
+
+      if (typeof res._implicitHeader !== "function") {
+        res._implicitHeader = () => {
+          res._header = true;
+          return res;
+        };
+      }
+
+      return middleware(req, res, next);
+    };
+  };
+
+  Object.assign(compatSession, sessionFactory);
+  return compatSession;
+}
+
 const { FlowHttp } = require("@aspectron/flow-http")({
   express,
-  session,
+  session: createSessionCompat(session),
   //sockjs,
   ws,
   Cookie,
   CookieSignature,
 });
 const Decimal = require("decimal.js");
-const { Wallet, initHoosatFramework, log } = require("@hoosat/wallet-worker");
-Wallet.setWorkerLogLevel("none");
+const { Wallet, initHoosatFramework, log } = require("@hoosat/wallet");
 
 const { RPC } = require("@kaspa/grpc-node");
 const DAY = 1000 * 60 * 60 * 24;
@@ -41,8 +89,70 @@ class HoosatFaucet extends EventEmitter {
     this.cache = {};
 
     this.options = {
-      port: 3000,
+      limit: 200,
+      rpc: "127.0.0.1:42420",
+      host: "0.0.0.0",
+      port: 3099,
     };
+
+  }
+
+  async submitWalletTransaction(network, tx) {
+    const wallet = this.wallets[network];
+    if (!wallet) {
+      throw new Error(`Wallet interface is not active for network ${network}`);
+    }
+
+    log.info(`Submitting faucet transaction on ${network} to ${tx.toAddr} for ${Wallet.HTN(tx.amount)}`);
+    try {
+      const response = await wallet.submitTransaction(tx);
+      await this.refreshWalletState(network);
+      log.info(`Faucet transaction submitted on ${network}: ${response?.txid || "no-txid"}`);
+      return response;
+    } catch (error) {
+      if (!/Insufficient balance/.test(error?.message || "")) {
+        throw error;
+      }
+
+      log.warn(`[${network}] Wallet reported insufficient balance, refreshing tracked UTXOs and retrying once`);
+      await this.refreshWalletState(network);
+
+      const response = await wallet.submitTransaction(tx);
+      await this.refreshWalletState(network);
+      log.info(`Faucet transaction submitted on ${network}: ${response?.txid || "no-txid"}`);
+      return response;
+    }
+  }
+
+  async refreshWalletState(network) {
+    const wallet = this.wallets[network];
+    const address = this.addresses[network];
+    if (!wallet || !address) {
+      return;
+    }
+
+    const utxosMap = await wallet.api.getUtxosByAddresses([address]);
+    const latestUtxos = utxosMap.get(address) || [];
+    const latestIds = new Set(latestUtxos.map((utxo) => utxo.transactionId + utxo.index));
+    const staleIds = [];
+
+    [wallet.utxoSet.utxos.confirmed, wallet.utxoSet.utxos.pending, wallet.utxoSet.utxos.used].forEach((collection) => {
+      collection.forEach((utxo, utxoId) => {
+        if (String(utxo.address) === address && !latestIds.has(utxoId)) {
+          staleIds.push(utxoId);
+        }
+      });
+    });
+
+    if (staleIds.length) {
+      wallet.utxoSet.remove([...new Set(staleIds)]);
+    }
+
+    wallet.utxoSet.utxoStorage[address] = latestUtxos;
+    wallet.utxoSet.add(latestUtxos, address);
+    wallet.utxoSet.clearMissing();
+    wallet.updateDebugInfo();
+    wallet.emitBalance();
   }
 
   async initHttp() {
@@ -132,7 +242,6 @@ class HoosatFaucet extends EventEmitter {
         { network: network.replace("hoosat-", ""), rpc },
         { disableAddressDerivation: true }
       );
-      this.wallets[network].checkGRPCFlags();
       console.log(this.wallets);
 
       this.addresses[network] = await this.wallets[network].receiveAddress;
@@ -141,8 +250,8 @@ class HoosatFaucet extends EventEmitter {
         this.options.limit === false
           ? Number.MAX_SAFE_INTEGER
           : Decimal(this.options.limit || 0.35)
-              .mul(1e8)
-              .toNumber();
+            .mul(1e8)
+            .toNumber();
       this.wallets[network].setLogLevel(log.level);
 
       log.info(`${Wallet.networkTypes[network]?.name} address - ${this.addresses[network]}`);
@@ -268,7 +377,7 @@ class HoosatFaucet extends EventEmitter {
         } else {
           try {
             const fee = 0;
-            let response = await this.wallets[network].submitTransaction({
+            let response = await this.submitWalletTransaction(network, {
               toAddr: address,
               amount,
               fee,
@@ -283,8 +392,8 @@ class HoosatFaucet extends EventEmitter {
             this.updateLimit({ network, ip, amount });
             this.publishLimit({ network, socket, ip });
           } catch (ex) {
-            console.log(ex);
-            msg.respond(ex);
+            log.error(`Faucet transaction failed on ${network}: ${ex?.stack || ex}`);
+            msg.error({ error: ex?.message || ex?.toString?.() || "Internal faucet failure" });
           }
         }
       }
@@ -318,14 +427,13 @@ class HoosatFaucet extends EventEmitter {
       let { available, period } = this.calculateAvailable({ network, ip, address });
       if (available < amount) {
         return {
-          error: `Unable to send funds: you have ${this.HTN(available)} HTN ${
-            period == null ? `available.` : `remaining. Your limit will update in ${this.duration(period)}.`
-          }`,
+          error: `Unable to send funds: you have ${this.HTN(available)} HTN ${period == null ? `available.` : `remaining. Your limit will update in ${this.duration(period)}.`
+            }`,
         };
       } else {
         try {
           const fee = 0;
-          let response = await this.wallets[network].submitTransaction({
+          let response = await this.submitWalletTransaction(network, {
             toAddr: address,
             amount,
             fee,
@@ -392,8 +500,7 @@ class HoosatFaucet extends EventEmitter {
           }
           let blocksSinceLastUpdate = Math.round(10 * (bpsArray.reduce((a, b) => a + b, 0) / bpsArray.length)) / 10;
           console.debug(
-            `[${network}] blueScore: ${blueScore}, bps: ${
-              (bps < 10 ? " " : "") + bps.toFixed(1)
+            `[${network}] blueScore: ${blueScore}, bps: ${(bps < 10 ? " " : "") + bps.toFixed(1)
             }, bps-30s: ${blocksSinceLastUpdate.toFixed(1)}, raw: [${bpsArray.join(", ")}]`
           );
           flowHttp.sockets.publish(`blue-score`, { blueScore, network, blocksSinceLastUpdate });

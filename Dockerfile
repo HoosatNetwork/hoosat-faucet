@@ -1,22 +1,22 @@
-# -----
-FROM node:18-alpine
+FROM node:16-alpine AS build
 
-RUN apk add --no-cache bash nano coreutils git go
+RUN apk update
+RUN apk add --no-cache bash nano coreutils git 
 
-# Create non-root user
 RUN addgroup -S faucet && adduser -S faucet -G faucet
+RUN mkdir -p /run/postgresql
+RUN chown faucet:faucet /run/postgresql
 
-RUN mkdir -p /run/postgresql && chown faucet:faucet /run/postgresql
-
-WORKDIR /home/faucet/releases/faucet
-
+WORKDIR /app
 COPY . .
 
-RUN rm -rf node_modules package-lock.json && \
-    npm install
+RUN rm -rf node_modules package-lock.json
+RUN chown -R faucet:faucet .
+
+RUN npm install
 
 USER faucet
 
-EXPOSE 16110 16210 16510 16610 16111 16211 16511 16611
+EXPOSE 3099
 
-ENTRYPOINT ["node", "hoosat-faucet-website.js", "--mainnet"]
+ENTRYPOINT ["node","hoosat-faucet.js","--mainnet"]
