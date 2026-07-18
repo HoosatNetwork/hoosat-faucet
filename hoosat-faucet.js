@@ -261,59 +261,54 @@ class HoosatFaucet extends EventEmitter {
   }
 
   calculateAvailable({ network, ip, address }) {
-    if (this.limits[network] == Number.MAX_SAFE_INTEGER) return Number.MAX_SAFE_INTEGER;
-
-    let user_by_addr = address && address !== "default" ? this.address_limit_map.get(address) : undefined;
-    let user_by_ip = ip ? this.ip_limit_map.get(ip) : undefined;
-
-    let user;
-    if (!user_by_addr && user_by_ip) {
-      log.info(`Using limit for ip ${ip} for unknown address ${address}`);
-      this.address_limit_map.set(address, user_by_ip);
-      user = user_by_ip;
-    } else if (!user_by_ip && user_by_addr) {
-      log.info(`Using limit for address ${address} for unknown ip ${ip}`);
-      this.ip_limit_map.set(ip, user_by_addr);
-      user = user_by_addr;
-    } else if (user_by_addr && user_by_ip) {
-      log.info(`Using limit for address ${address} for known ip ${ip}`);
-      this.ip_limit_map.set(ip, user_by_addr);
-      user = user_by_addr;
-    } else {
-      user = {};
-      this.address_limit_map.set(address, user);
-      this.ip_limit_map.set(ip, user);
-    }
-
-    if (!user[network]) user[network] = [];
+    if (this.limits[network] == Number.MAX_SAFE_INTEGER) return { available: Number.MAX_SAFE_INTEGER, period: null };
 
     const ts = Date.now();
     const period_start = ts - DAY;
-    const transactions = (user[network] = user[network].filter((tx) => tx.ts > period_start));
-    const spent = transactions.reduce((v, tx) => tx.amount + v, 0);
-    const available = this.limits[network] - spent;
-    const period = transactions.length ? transactions[0].ts - period_start : null;
-    log.info(`Address ${address} on ip ${ip} has ${available / 100000000} HTN available`);
+
+    // Get clean transaction histories for both constraints
+    let ipHistory = (this.ip_limit_map.get(ip)?.[network] || []).filter(tx => tx.ts > period_start);
+    let addrHistory = (address && address !== "default")
+      ? (this.address_limit_map.get(address)?.[network] || []).filter(tx => tx.ts > period_start)
+      : [];
+
+    // Calculate spent amounts for both paths independently
+    const ipSpent = ipHistory.reduce((v, tx) => tx.amount + v, 0);
+    const addrSpent = addrHistory.reduce((v, tx) => tx.amount + v, 0);
+
+    // The current available balance is constrained by whichever limit has less room left
+    const ipAvailable = this.limits[network] - ipSpent;
+    const addrAvailable = this.limits[network] - addrSpent;
+    const available = Math.min(ipAvailable, addrAvailable);
+
+    // Capture the time remaining until the oldest window clears
+    let longestHistory = ipSpent > addrSpent ? ipHistory : addrHistory;
+    const period = longestHistory.length ? longestHistory[0].ts - period_start : null;
+
+    log.info(`Limit Check -> IP Spent: ${ipSpent / 1e8}, Addr Spent: ${addrSpent / 1e8}. Available: ${available / 1e8} HTN`);
     return { available, period };
   }
 
   updateLimit({ network, ip, address, amount }) {
     if (this.limits[network] == Number.MAX_SAFE_INTEGER) return;
 
-    // Get the user history object using either the address or IP
-    let user = (address && address !== "default")
-      ? this.address_limit_map.get(address)
-      : this.ip_limit_map.get(ip);
+    const txRecord = { ts: Date.now(), amount };
 
-    if (!user) {
-      user = {};
-      if (address && address !== "default") this.address_limit_map.set(address, user);
-      if (ip) this.ip_limit_map.set(ip, user);
+    // 1. Force record insertion into IP map
+    if (ip) {
+      if (!this.ip_limit_map.has(ip)) this.ip_limit_map.set(ip, {});
+      const ipUser = this.ip_limit_map.get(ip);
+      if (!ipUser[network]) ipUser[network] = [];
+      ipUser[network].push(txRecord);
     }
 
-    if (!user[network]) user[network] = [];
-
-    user[network].push({ ts: Date.now(), amount });
+    // 2. Force record insertion into Address map
+    if (address && address !== "default") {
+      if (!this.address_limit_map.has(address)) this.address_limit_map.set(address, {});
+      const addrUser = this.address_limit_map.get(address);
+      if (!addrUser[network]) addrUser[network] = [];
+      addrUser[network].push(txRecord);
+    }
   }
 
   publishLimit({ network, socket, ip }) {
