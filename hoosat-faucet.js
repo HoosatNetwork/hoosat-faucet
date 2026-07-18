@@ -297,9 +297,23 @@ class HoosatFaucet extends EventEmitter {
     return { available, period };
   }
 
-  updateLimit({ network, ip, amount }) {
+  updateLimit({ network, ip, address, amount }) {
     if (this.limits[network] == Number.MAX_SAFE_INTEGER) return;
-    this.ip_limit_map.get(ip)[network].push({ ts: Date.now(), amount });
+
+    // Get the user history object using either the address or IP
+    let user = (address && address !== "default")
+      ? this.address_limit_map.get(address)
+      : this.ip_limit_map.get(ip);
+
+    if (!user) {
+      user = {};
+      if (address && address !== "default") this.address_limit_map.set(address, user);
+      if (ip) this.ip_limit_map.set(ip, user);
+    }
+
+    if (!user[network]) user[network] = [];
+
+    user[network].push({ ts: Date.now(), amount });
   }
 
   publishLimit({ network, socket, ip }) {
@@ -342,8 +356,14 @@ class HoosatFaucet extends EventEmitter {
     let requests = flowHttp.sockets.subscribe("faucet-request");
     (async () => {
       for await (const msg of requests) {
-        const { data, ip, socket } = msg;
+        var { data, ip, socket } = msg;
         const { address, network, amount: amount_ } = data;
+
+
+        const effectiveIp = getIp(socket || msg);
+        console.log(`[IP DEBUG] Using IP: ${effectiveIp}`);
+
+        ip = effectiveIp;
 
         const amount = parseInt(amount_);
         if (isNaN(amount) || !amount || amount < 0) {
@@ -389,7 +409,7 @@ class HoosatFaucet extends EventEmitter {
             const txid = response?.txid || null;
             ({ available, period } = this.calculateAvailable({ network, ip, address }));
             msg.respond({ amount, address, network, txid, available });
-            this.updateLimit({ network, ip, amount });
+            this.updateLimit({ network, ip, address, amount });
             this.publishLimit({ network, socket, ip });
           } catch (ex) {
             log.error(`Faucet transaction failed on ${network}: ${ex?.stack || ex}`);
@@ -399,8 +419,14 @@ class HoosatFaucet extends EventEmitter {
       }
     })();
 
-    const getIp = (req) => {
-      return req.headers["cf-connecting-ip"] || req.headers["x-real-ip"] || req.headers["x-client-ip"];
+    const getIp = (msg) => {
+      const headers = msg.headers;
+      console.log(headers)
+      // Prefer first entry in X-Forwarded-For (real client)
+      let ip = (headers["x-forwarded-for"] && headers["x-forwarded-for"].split(',')[0].trim());
+
+      if (ip && ip.startsWith('::ffff:')) ip = ip.substring(7);
+      return ip || '127.0.0.1';
     };
 
     const getAvailable = async ({ network, ip }) => {
@@ -443,7 +469,7 @@ class HoosatFaucet extends EventEmitter {
           });
 
           const txid = response?.txid || null;
-          this.updateLimit({ network, ip, amount });
+          this.updateLimit({ network, ip, address, amount });
           ({ available, period } = this.calculateAvailable({ network, ip, address }));
           return { success: true, amount, address, network, txid, available, period };
         } catch (ex) {
