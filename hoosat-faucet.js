@@ -348,16 +348,15 @@ class HoosatFaucet extends EventEmitter {
       }
     })();
 
+
+
     let requests = flowHttp.sockets.subscribe("faucet-request");
     (async () => {
       for await (const msg of requests) {
         var { data, ip, socket } = msg;
         const { address, network, amount: amount_ } = data;
 
-
         const effectiveIp = getIp(socket || msg);
-        console.log(`[IP DEBUG] Using IP: ${effectiveIp}`);
-
         ip = effectiveIp;
 
         const amount = parseInt(amount_);
@@ -365,8 +364,6 @@ class HoosatFaucet extends EventEmitter {
           msg.error(`Invalid amount: ${amount_}`);
           continue;
         }
-        log.info(`request from ${ip} for ${Wallet.HTN(amount)}`);
-        const limit = this.limits[network] === false ? Number.MAX_SAFE_INTEGER : this.limits[network] || 0;
 
         if (!this.networks.includes(network)) {
           msg.error(`Unknown network ${network}`);
@@ -374,9 +371,7 @@ class HoosatFaucet extends EventEmitter {
         }
         const [prefix] = address.split(":");
         if (prefix != "hoosat" && prefix != "hoosattest") {
-          msg.error(
-            `Incompatible address ${address} for network ${network} with ${prefix} as required hoosat or hoosattest`
-          );
+          msg.error(`Incompatible address ${address} for network ${network}`);
           continue;
         }
 
@@ -385,31 +380,40 @@ class HoosatFaucet extends EventEmitter {
           continue;
         }
 
+        // 1. Check availability BEFORE processing
         let { available, period } = this.calculateAvailable({ network, ip, address });
         if (available < amount) {
           msg.error({ error: "limit", available, period });
           continue;
-        } else {
-          try {
-            const fee = 0;
-            let response = await this.submitWalletTransaction(network, {
-              toAddr: address,
-              amount,
-              fee,
-              networkFeeMax: 1e8,
-              calculateNetworkFee: true,
-              changeAddrOverride: this.addresses[network],
-            });
+        }
 
-            const txid = response?.txid || null;
-            ({ available, period } = this.calculateAvailable({ network, ip, address }));
-            msg.respond({ amount, address, network, txid, available });
-            this.updateLimit({ network, ip, address, amount });
-            this.publishLimit({ network, socket, ip });
-          } catch (ex) {
-            log.error(`Faucet transaction failed on ${network}: ${ex?.stack || ex}`);
-            msg.error({ error: ex?.message || ex?.toString?.() || "Internal faucet failure" });
-          }
+        // 2. IMMEDIATE LOCKOUT: Claim the limit space synchronously BEFORE yielding to await
+        log.info(`[LOCK] Reserving ${Wallet.HTN(amount)} for IP: ${ip} / Addr: ${address}`);
+        this.updateLimit({ network, ip, address, amount });
+
+        try {
+          const fee = 0;
+          let response = await this.submitWalletTransaction(network, {
+            toAddr: address,
+            amount,
+            fee,
+            networkFeeMax: 1e8,
+            calculateNetworkFee: true,
+            changeAddrOverride: this.addresses[network],
+          });
+
+          const txid = response?.txid || null;
+          ({ available, period } = this.calculateAvailable({ network, ip, address }));
+          msg.respond({ amount, address, network, txid, available });
+          this.publishLimit({ network, socket, ip });
+        } catch (ex) {
+          log.error(`Faucet transaction failed on ${network}: ${ex?.stack || ex}`);
+
+          // 3. REFUND LIMIT: If it failed, remove this specific allocation from their history
+          log.warn(`[REFUND] Reverting reserved amount for IP: ${ip} / Addr: ${address} due to failure`);
+          this.refundLimit({ network, ip, address, amount });
+
+          msg.error({ error: ex?.message || ex?.toString?.() || "Internal faucet failure" });
         }
       }
     })();
@@ -437,40 +441,41 @@ class HoosatFaucet extends EventEmitter {
     const getHoosat = async ({ address, amount: amount_, ip }) => {
       const amount = parseInt(amount_);
       if (isNaN(amount) || !amount || amount < 0) return { error: `Invalid amount: ${amount_}` };
-
       if (!address || !/^hoosat(test|dev|sim)*:/.test(address)) return { error: `Invalid address: ${address}` };
 
       let network = address.split(":").shift();
       if (!this.networks.includes(network)) return { error: `Unknown network: ${network}` };
-
       if (!this.wallets[network]) return { error: `Wallet interface is not active for network ${network}` };
 
       let { available, period } = this.calculateAvailable({ network, ip, address });
       if (available < amount) {
         return {
-          error: `Unable to send funds: you have ${this.HTN(available)} HTN ${period == null ? `available.` : `remaining. Your limit will update in ${this.duration(period)}.`
-            }`,
+          error: `Unable to send funds: limit reached.`,
         };
-      } else {
-        try {
-          const fee = 0;
-          let response = await this.submitWalletTransaction(network, {
-            toAddr: address,
-            amount,
-            fee,
-            networkFeeMax: 1e8,
-            calculateNetworkFee: true,
-            changeAddrOverride: this.addresses[network],
-          });
+      }
 
-          const txid = response?.txid || null;
-          this.updateLimit({ network, ip, address, amount });
-          ({ available, period } = this.calculateAvailable({ network, ip, address }));
-          return { success: true, amount, address, network, txid, available, period };
-        } catch (ex) {
-          console.log(ex);
-          return { error: "Internal faucet failure", info: ex.toString() };
-        }
+      // Lock synchronously before running the async network wallet transaction
+      this.updateLimit({ network, ip, address, amount });
+
+      try {
+        const fee = 0;
+        let response = await this.submitWalletTransaction(network, {
+          toAddr: address,
+          amount,
+          fee,
+          networkFeeMax: 1e8,
+          calculateNetworkFee: true,
+          changeAddrOverride: this.addresses[network],
+        });
+
+        const txid = response?.txid || null;
+        ({ available, period } = this.calculateAvailable({ network, ip, address }));
+        return { success: true, amount, address, network, txid, available, period };
+      } catch (ex) {
+        // Refund if it fails
+        this.refundLimit({ network, ip, address, amount });
+        console.log(ex);
+        return { error: "Internal faucet failure", info: ex.toString() };
       }
     };
 
@@ -544,6 +549,22 @@ class HoosatFaucet extends EventEmitter {
         while (this.cache[network].length > 24) this.cache[network].shift();
       });
     }
+  }
+
+  refundLimit({ network, ip, address, amount }) {
+    if (this.limits[network] == Number.MAX_SAFE_INTEGER) return;
+
+    const filterTx = (history) => {
+      if (!history || !history[network]) return;
+      // Find the index of the most recent item matching this amount to remove it
+      const index = history[network].findIndex(tx => tx.amount === amount);
+      if (index !== -1) {
+        history[network].splice(index, 1);
+      }
+    };
+
+    if (ip) filterTx(this.ip_limit_map.get(ip));
+    if (address && address !== "default") filterTx(this.address_limit_map.get(address));
   }
 
   duration(v) {
