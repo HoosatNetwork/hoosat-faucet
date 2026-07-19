@@ -339,7 +339,7 @@ class HoosatFaucet extends EventEmitter {
       for await (const event of socketConnections) {
         const { networks, addresses, limits } = this;
         const { socket } = event;
-        const ip = socket.ip;
+        const ip = getIp(socket || msg);
         socket.publish("networks", { networks });
         socket.publish("addresses", { addresses });
 
