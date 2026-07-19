@@ -11,6 +11,7 @@ export class FaucetForm extends BaseElement {
       network: { type: String },
       networks: { type: Array },
       address: { type: String },
+      captchaQuestion: { type: String },
     };
   }
   static get styles() {
@@ -43,10 +44,14 @@ export class FaucetForm extends BaseElement {
     super();
     this.networks = [];
     this.address = "";
+    this.captchaQuestion = "";
   }
 
   onlineCallback() {
     const { rpc } = flow.app;
+    rpc.subscribe("captcha-challenge", (data) => {
+      this.captchaQuestion = data.question;
+    });
   }
 
   offlineCallback() { }
@@ -65,6 +70,10 @@ export class FaucetForm extends BaseElement {
       <flow-select label="Network" selected="${this.network}" class="network" @select=${this.networkChange}>
         ${this.networks.map((n) => html`<flow-menu-item value="${n}">${aliases[n]}</flow-menu-item>`)}
       </flow-select>
+      <div style="margin: 15px 0;">
+        <div class="message" style="margin: 5px 0;">Security Verification: Solve ${this.captchaQuestion || '...'}</div>
+        <flow-input label="Answer" class="captcha-answer" value=""></flow-input>
+      </div>
       <div class="error">${this.errorMessage}</div>
       <flow-btn primary @click="${this.submit}">SUBMIT</flow-btn>
     `;
@@ -75,7 +84,11 @@ export class FaucetForm extends BaseElement {
     let address = qS(".address").value;
     let network = qS(".network").value;
     let amount = qS(".amount").value;
+    let captchaAnswer = qS(".captcha-answer").value;
     const addressPrefix = getAddressPrefix(network);
+
+    if (!address) return this.setError("Please enter address");
+    if (!captchaAnswer) return this.setError("Please solve the math puzzle");
 
     console.log({ address, network, amount });
 
@@ -110,9 +123,11 @@ export class FaucetForm extends BaseElement {
         address,
         network,
         amount,
+        captchaAnswer,
       },
       (error, result) => {
         console.log({ error, result });
+        if (qS(".captcha-answer")) qS(".captcha-answer").value = "";
         if (error) {
           let msg = "";
           if (error.error == "limit") {

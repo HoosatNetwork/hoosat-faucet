@@ -1,19 +1,15 @@
 import { dpc, html, css, BaseElement } from "/flow/flow-ux/flow-ux.js";
 import { Decimal } from "/flow/flow-ux/extern/decimal.js";
-// import {BigNumber} from '/flow/flow-ux/resources/extern/bignumber.js/bignumber.mjs';
-
-// Decimal.set({ precision : 2, rounding : 4 });
-// console.log("Decimal:", Decimal('123.123456789999').toFixed(8));
 
 export class FaucetTransactions extends BaseElement {
   static get properties() {
     return {
-      //transactions : { type : Array },
-      //networks : { type : Array },
+      transactions: { type: Object },
       network: { type: String },
       limit: { type: Number },
     };
   }
+
   static get styles() {
     return css`
       :host {
@@ -31,9 +27,6 @@ export class FaucetTransactions extends BaseElement {
         display: flex;
         flex-direction: row;
       }
-      .xx-headers div {
-        border: 1px solid red;
-      }
       .headers :nth-child(1) {
         width: var(--value-column-width);
         text-align: center;
@@ -45,9 +38,7 @@ export class FaucetTransactions extends BaseElement {
       .headers :nth-child(3) {
         width: var(--txid-column-width);
       }
-      /*.headers div { border: 1px solid red; }*/
       .transactions {
-        /*font-family : "IBM Plex Sans Condensed"; font-size: 18px;*/
         margin-top: 4px;
       }
     `;
@@ -56,31 +47,98 @@ export class FaucetTransactions extends BaseElement {
   constructor() {
     super();
     this.transactions = {};
-    this.limit = 25;
-    this.transactionUpdates = {};
+    this.limit = 15;
+    this.transactionUpdates = null;
   }
 
-  onlineCallback() {
-    const { rpc, networks } = flow.app;
+  async onlineCallback() {
+    const { rpc } = flow.app;
+    const faucetAddress = "hoosat:qrlrgxpafeurkhda2u4n8rtwfsyya7f049q6w7a7nv36eun3qlcx29jdp0795";
 
+    // 1. Fetch historical address transactions from the REST API
+    try {
+      const targetAddress = encodeURIComponent(faucetAddress);
+      const res = await fetch(`https://api.network.hoosat.fi/addresses/${targetAddress}/full-transactions?limit=${this.limit}&offset=0&resolve_previous_outpoints=no`, {
+        headers: { 'accept': 'application/json' }
+      });
+
+      if (res.ok) {
+        const apiData = await res.json();
+
+        const historicalTx = Array.isArray(apiData) ? apiData.map(item => {
+          // Fallback extraction depending on if payload puts properties at root or under a transaction object
+          const txObj = item.transaction || item;
+          const txid = txObj.transaction_id || item.transaction_id || "";
+          const txTime = txObj.block_time || item.block_time || "";
+
+          // Find the specific output directed to our faucet address to display the proper amount
+          let amount = 0;
+          const outputs = txObj.outputs || item.outputs || [];
+          const targetOutput = outputs.find(o => o.script_public_key_address === faucetAddress);
+          if (targetOutput) {
+            amount = targetOutput.amount;
+          } else if (outputs.length > 0) {
+            amount = outputs[0].amount; // Fallback to first output if specific match missing
+          }
+
+          // Return uniform schema matching both the subcomponent requirements and standard fallback names
+          return {
+            amount: amount,
+            txid: txid,
+            txTime: txTime,
+            outpoint: {
+              transactionId: txid,
+              index: 0
+            }
+          };
+        }) : [];
+
+        this.transactions = {
+          ...this.transactions,
+          [this.network]: historicalTx
+        };
+      }
+    } catch (err) {
+      console.error("Failed to fetch historical faucet transactions:", err);
+    }
+
+    // 2. Setup real-time updates from RPC stream
     this.transactionUpdates = rpc.subscribe(`utxo-change`);
     (async () => {
       for await (const msg of this.transactionUpdates) {
-        const { network, added, removed, seq } = msg.data;
-        const transactions = this.transactions[network] || (this.transactions[network] = []);
+        const { network, added } = msg.data;
+
+        const currentList = this.transactions[network] ? [...this.transactions[network]] : [];
+
         added.forEach((tx) => {
-          transactions.unshift({
+          // Normalize the stream input properties to maintain exact field parity
+          const txid = tx.outpoint?.transactionId || tx.txid || "";
+          const txTime = tx.block_time || tx.block_time || "";
+
+          currentList.unshift({
             ...tx,
+            txid: txid,
+            txTime: txTime,
+            outpoint: tx.outpoint || { transactionId: txid, index: 0 }
           });
         });
-        while (transactions.length > this.limit) transactions.pop();
-        if (this.network == network) this.requestUpdate();
+
+        while (currentList.length > this.limit) {
+          currentList.pop();
+        }
+
+        this.transactions = {
+          ...this.transactions,
+          [network]: currentList
+        };
       }
-    })().then();
+    })().catch(err => console.error("Transaction stream error:", err));
   }
 
   offlineCallback() {
-    this.transactionUpdates.stop();
+    if (this.transactionUpdates) {
+      this.transactionUpdates.stop();
+    }
   }
 
   render() {
@@ -90,7 +148,7 @@ export class FaucetTransactions extends BaseElement {
         <div class="caption">Faucet Transactions</div>
         <div class="headers">
           <div>VALUE (HTN)</div>
-          <div>DAG DAA SCORE</div>
+          <div>Time</div>
           <div>TXID</div>
         </div>
         <div class="transactions">

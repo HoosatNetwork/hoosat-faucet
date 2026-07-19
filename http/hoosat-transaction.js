@@ -1,4 +1,4 @@
-import { dpc, html, css, BaseElement, FlowFormat } from "/flow/flow-ux/flow-ux.js";
+import { dpc, html, css, BaseElement } from "/flow/flow-ux/flow-ux.js";
 import { HTN } from "./htn.js";
 
 export class HoosatTransaction extends BaseElement {
@@ -7,6 +7,7 @@ export class HoosatTransaction extends BaseElement {
       data: { type: Object },
     };
   }
+
   static get styles() {
     return css`
       :host {
@@ -15,6 +16,7 @@ export class HoosatTransaction extends BaseElement {
       }
       .transaction {
         margin-top: 4px;
+        align-items: center;
       }
       .transaction :nth-child(1) {
         width: var(--value-column-width);
@@ -27,9 +29,6 @@ export class HoosatTransaction extends BaseElement {
       .transaction :nth-child(3) {
         width: var(--txid-column-width);
       }
-      .xx-transaction div {
-        border: 1px solid red;
-      }
       .caption {
         font-family: "Open Sans";
         font-size: 14px;
@@ -39,8 +38,22 @@ export class HoosatTransaction extends BaseElement {
         font-size: 16px;
         color: #666;
       }
-      /*.value { font-family : "IBM Plex Mono"; font-size: 22px;  }*/
-      /*.value { font-family : "IBM Plex Sans Condensed"; font-size: 22px;  }*/
+      .value > a {
+        display: block;
+        width: 100%;
+        font-family: "Consolas";
+        font-size: 16px;
+        color: #666;
+        text-decoration: none;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        cursor: pointer;
+      }
+      .value > a:hover {
+        text-decoration: underline;
+        color: var(--flow-primary-color, #007bff);
+      }
       [row] {
         display: flex;
         flex-direction: row;
@@ -54,17 +67,46 @@ export class HoosatTransaction extends BaseElement {
 
   constructor() {
     super();
-    this.transactions = [];
+    this.data = {};
+  }
+
+  formatTimestamp(timestamp) {
+    if (!timestamp) return "Pending";
+
+    let ts = Number(timestamp);
+    if (isNaN(ts)) return timestamp;
+
+    if (ts < 10000000000) {
+      ts = ts * 1000;
+    }
+
+    const date = new Date(ts);
+
+    return date.getFullYear() + '-' +
+      String(date.getMonth() + 1).padStart(2, '0') + '-' +
+      String(date.getDate()).padStart(2, '0') + ' ' +
+      String(date.getHours()).padStart(2, '0') + ':' +
+      String(date.getMinutes()).padStart(2, '0') + ':' +
+      String(date.getSeconds()).padStart(2, '0');
   }
 
   render() {
-    let tx = this.data;
+    const tx = this.data || {};
+
+    const txid = tx.txid || tx.transactionId || tx.outpoint?.transactionId || "";
+    const rawTime = tx.txTime || tx.time || tx.block_time || tx.transaction?.block_time || "";
+    const humanTime = this.formatTimestamp(rawTime);
+    const amountVal = tx.amount || 0;
 
     return html`
       <div class="transaction" row>
-        <div class="value">${(tx.amount > 0 ? " " : "") + HTN(tx.amount, true)}</div>
-        <div class="value">${FlowFormat.commas(tx.blockDaaScore)}</div>
-        <div class="value">${tx.transactionId.substring(0, 20)}</div>
+        <div class="value">${(amountVal > 0 ? " " : "") + HTN(amountVal, true)}</div>
+        <div class="value">${humanTime}</div>
+        <div class="value">
+          <a href="https://explorer.hoosat.fi/txs/${txid || ''}" target="_blank" rel="noopener noreferrer">
+            ${txid ? txid.substring(0, 12) + ".." : 'N/A'}
+          </a>
+        </div>
       </div>
     `;
   }

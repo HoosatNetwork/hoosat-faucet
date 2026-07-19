@@ -260,6 +260,18 @@ class HoosatFaucet extends EventEmitter {
     this.networks = Object.keys(this.wallets);
   }
 
+  generateCaptcha(socket) {
+    const num1 = Math.floor(Math.random() * 10) + 1;
+    const num2 = Math.floor(Math.random() * 10) + 1;
+
+    // Store answer directly safely referenced to this active socket session context
+    socket.captchaAnswer = num1 + num2;
+
+    socket.publish("captcha-challenge", {
+      question: `${num1} + ${num2} = ?`
+    });
+  }
+
   calculateAvailable({ network, ip, address }) {
     if (this.limits[network] == Number.MAX_SAFE_INTEGER) return { available: Number.MAX_SAFE_INTEGER, period: null };
 
@@ -330,6 +342,9 @@ class HoosatFaucet extends EventEmitter {
         const ip = socket.ip;
         socket.publish("networks", { networks });
         socket.publish("addresses", { addresses });
+
+        this.generateCaptcha(socket);
+
         networks.forEach((network) => {
           let wallet = this.wallets[network];
 
@@ -355,6 +370,17 @@ class HoosatFaucet extends EventEmitter {
       for await (const msg of requests) {
         var { data, ip, socket } = msg;
         const { address, network, amount: amount_ } = data;
+
+        // Verify challenge answer match
+        const expected = socket?.captchaAnswer;
+
+        // Always immediately roll over to a brand new problem so they can't replay answers
+        if (socket) this.generateCaptcha(socket);
+
+        if (!expected || parseInt(captchaAnswer) !== expected) {
+          msg.error("Invalid or missing CAPTCHA answer. Please try again.");
+          continue;
+        }
 
         const effectiveIp = getIp(socket || msg);
         ip = effectiveIp;
@@ -639,6 +665,8 @@ class HoosatFaucet extends EventEmitter {
     return frac ? `${int}.${frac}` : int;
   }
 }
+
+
 
 (async () => {
   let hoosatFaucet = new HoosatFaucet(__dirname);

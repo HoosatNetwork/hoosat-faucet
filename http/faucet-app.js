@@ -112,7 +112,7 @@ class HoosatFaucetApp extends FlowApp {
             <div class="divider"></div>
             <div col class="balance-wrapper">
               <faucet-balance network="${network}"></faucet-balance>
-              <faucet-transactions network="${network}"></faucet-transactions>
+              <faucet-transactions network="${network}" address="${address}"></faucet-transactions>
             </div>
             <div class="divider"></div>
             <div col class="form-wrapper">
