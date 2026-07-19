@@ -129,6 +129,7 @@ export class FaucetForm extends BaseElement {
       (error, result) => {
         console.log({ error, result });
         if (qS(".captcha-answer")) qS(".captcha-answer").value = "";
+        flow.app.rpc.dispatch("get-captcha", {});
         if (error) {
           let msg = "";
           if (error.error == "limit") {
