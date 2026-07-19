@@ -364,6 +364,17 @@ class HoosatFaucet extends EventEmitter {
     })();
 
 
+    let captchaRequests = flowHttp.sockets.subscribe("get-captcha");
+    (async () => {
+      for await (const msg of captchaRequests) {
+        const { socket } = msg;
+        if (socket) {
+          this.generateCaptcha(socket);
+          msg.respond({ success: true });
+        }
+      }
+    })();
+
 
     let requests = flowHttp.sockets.subscribe("faucet-request");
     (async () => {

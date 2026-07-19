@@ -52,6 +52,7 @@ export class FaucetForm extends BaseElement {
     rpc.subscribe("captcha-challenge", (data) => {
       this.captchaQuestion = data.question;
     });
+    rpc.dispatch("get-captcha", {});
   }
 
   offlineCallback() { }
