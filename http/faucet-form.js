@@ -48,11 +48,16 @@ export class FaucetForm extends BaseElement {
   }
 
   onlineCallback() {
-    const { rpc } = flow.app;
-    rpc.subscribe("captcha-challenge", (data) => {
-      this.captchaQuestion = data.question;
+    this.fetchNewCaptcha();
+  }
+
+  fetchNewCaptcha() {
+    flow.app.rpc.request("get-captcha", {}, (err, res) => {
+      if (!err && res && res.question) {
+        this.captchaQuestion = res.question;
+        this.requestUpdate(); // Forces UI re-render
+      }
     });
-    rpc.dispatch("get-captcha", {});
   }
 
   offlineCallback() { }
@@ -129,7 +134,7 @@ export class FaucetForm extends BaseElement {
       (error, result) => {
         console.log({ error, result });
         if (qS(".captcha-answer")) qS(".captcha-answer").value = "";
-        flow.app.rpc.dispatch("get-captcha", {});
+        this.fetchNewCaptcha();
         if (error) {
           let msg = "";
           if (error.error == "limit") {

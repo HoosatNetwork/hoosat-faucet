@@ -369,8 +369,28 @@ class HoosatFaucet extends EventEmitter {
       for await (const msg of captchaRequests) {
         const { socket } = msg;
         if (socket) {
-          this.generateCaptcha(socket);
-          msg.respond({ success: true });
+          const num1 = Math.floor(Math.random() * 10) + 1;
+          const num2 = Math.floor(Math.random() * 10) + 1;
+
+          // Leet speak mapping for digits 1 to 10
+          const leetWords = [
+            "z3r0", "0n3", "tw0", "thr33", "f0ur",
+            "f1v3", "s1x", "s3v3n", "31ght", "n1n3", "t3n"
+          ];
+
+          // Helper function to randomly capitalize each character in a string
+          const randomizeCase = (str) =>
+            str.split("").map(char => Math.random() > 0.5 ? char.toUpperCase() : char.toLowerCase()).join("");
+
+          const word1 = randomizeCase(leetWords[num1]);
+          const word2 = randomizeCase(leetWords[num2]);
+          const operation = randomizeCase("plu5");
+
+          // Keep the exact numerical sum for validation
+          socket.captchaAnswer = num1 + num2;
+
+          // Respond with the randomized case leet speak question
+          msg.respond({ question: `${word1} ${operation} ${word2} = ?` });
         }
       }
     })();
@@ -380,13 +400,9 @@ class HoosatFaucet extends EventEmitter {
     (async () => {
       for await (const msg of requests) {
         var { data, ip, socket } = msg;
-        const { address, network, amount: amount_ } = data;
+        const { address, network, amount: amount_, captchaAnswer } = data;
 
-        // Verify challenge answer match
         const expected = socket?.captchaAnswer;
-
-        // Always immediately roll over to a brand new problem so they can't replay answers
-        if (socket) this.generateCaptcha(socket);
 
         if (!expected || parseInt(captchaAnswer) !== expected) {
           msg.error("Invalid or missing CAPTCHA answer. Please try again.");
